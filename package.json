@@ -1,6 +1,6 @@
 {
     "name": "@ostro/vite",
-    "version": "2.0.0-alpha.1",
+    "version": "2.0.0-alpha.2",
     "type": "module",
     "description": "OstroJS plugin for Vite.",
     "keywords": [
@@ -25,6 +25,10 @@
         ".": {
             "types": "./dist/index.d.ts",
             "default": "./dist/index.js"
+        },
+        "./federation": {
+            "types": "./dist/federation.d.ts",
+            "default": "./dist/federation.js"
         }
     },
     "files": [
