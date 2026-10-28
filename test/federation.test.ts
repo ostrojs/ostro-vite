@@ -12,7 +12,7 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         });
 
         expect(plugin.name).toBe('ostro-vite-module-federation');
-        expect(plugin.enforce).toBe('post');
+        expect(plugin.enforce).toBe('pre');
 
         const resolvedConfig = (plugin as any).config({} as any);
         expect(resolvedConfig.build?.target).toBe('esnext');

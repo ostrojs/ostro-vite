@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 import { createRequire } from 'module';
 import type { Plugin, UserConfig } from 'vite';
 
@@ -128,9 +129,28 @@ export function federation(options: ModuleFederationOptions): Plugin {
     const virtualRemotePrefix = 'ostro:federation/remotes/';
     const virtualModulePrefix = 'ostro:federation/exposes/';
 
+    const resolvePackageEntry = (pkgName: string): string => {
+        try {
+            const pkgJsonPath = path.resolve(process.cwd(), 'node_modules', pkgName, 'package.json');
+            if (fs.existsSync(pkgJsonPath)) {
+                const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+                const relativeEntry = pkg.module || (typeof pkg.browser === 'string' ? pkg.browser : null) || pkg.main || 'index.js';
+                const resolved = path.resolve(path.dirname(pkgJsonPath), relativeEntry);
+                if (fs.existsSync(resolved)) {
+                    return resolved;
+                }
+            }
+        } catch (_) {}
+        try {
+            const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+            return req.resolve(pkgName);
+        } catch (_) {}
+        return pkgName;
+    };
+
     return {
         name: 'ostro-vite-module-federation',
-        enforce: 'post',
+        enforce: 'pre',
 
         config(userConfig: UserConfig): UserConfig {
             const alias: Record<string, string> = {};
@@ -431,11 +451,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
             if (id.startsWith('\0ostro:federation/shared/')) {
                 const pkgName = id.slice('\0ostro:federation/shared/'.length);
                 if (pkgName !== 'react' && !pkgName.startsWith('react/') && pkgName !== 'react-dom' && !pkgName.startsWith('react-dom/')) {
-                    let localPath = pkgName;
-                    try {
-                        const req = createRequire(path.resolve(process.cwd(), 'package.json'));
-                        localPath = req.resolve(pkgName);
-                    } catch (_) {}
+                    const localPath = resolvePackageEntry(pkgName);
 
                     return [
                         `import * as _LocalPkg from ${JSON.stringify(localPath)};`,
@@ -574,8 +590,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
                         : `  return container;`,
                     `}`,
                     `const module = await loadRemoteContainer();`,
-                    `export default module.default || module;`,
-                    `export * from '${remoteExpr}';`
+                    `export default module.default || module;`
                 ].join('\n');
             }
 
