@@ -49,9 +49,10 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: 22
+          registry-url: 'https://registry.npmjs.org'
       - run: npm install -g npm@latest
       - uses: actions/download-artifact@v5
         with:
           name: dist-artifact
           path: dist/
-      - run: npm publish --access public --tag alpha --provenance
+      - run: npm publish --access public --tag alpha --provenance --ignore-scripts
