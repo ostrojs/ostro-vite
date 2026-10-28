@@ -299,3 +299,13 @@ function resolveFullReloadConfig({ refresh }: Required<PluginConfig>): PluginOpt
 
     return [];
 }
+
+export { federation } from './federation.js';
+export type {
+    ModuleFederationOptions,
+    FederationShared,
+    FederationSharedConfig,
+    FederationRemotes,
+    FederationExposes,
+    RemoteConfig
+} from './federation.js';
