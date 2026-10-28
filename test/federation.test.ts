@@ -235,8 +235,9 @@ describe('Vite Module Federation plugin for OstroJS', () => {
 
         const configWithObj = (plugin as any).config({});
         expect(configWithObj.resolve?.alias['^lodash$']).toBe('\0ostro:federation/shared/lodash');
-        expect(configWithObj.resolve?.alias['^react/jsx-runtime$']).toBe('\0ostro:federation/shared/react/jsx-runtime');
-        expect(configWithObj.resolve?.alias['^react-dom/client$']).toBe('\0ostro:federation/shared/react-dom/client');
+        expect(configWithObj.resolve?.alias['^lodash/(.*)$']).toBe('\0ostro:federation/shared/lodash/$1');
+        expect(configWithObj.resolve?.alias['^react/(.*)$']).toBe('\0ostro:federation/shared/react/$1');
+        expect(configWithObj.resolve?.alias['^react-dom/(.*)$']).toBe('\0ostro:federation/shared/react-dom/$1');
 
         expect((plugin as any).resolveId('app1')).toBe('\0ostro:federation/remotes/app1');
         expect((plugin as any).resolveId('app1/Comp')).toBe('\0ostro:federation/remotes/app1/Comp');

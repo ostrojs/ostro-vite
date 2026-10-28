@@ -153,15 +153,10 @@ export function federation(options: ModuleFederationOptions): Plugin {
         config(userConfig: UserConfig): UserConfig {
             const alias: Record<string, string> = {};
 
-            // Dynamically map all configured shared packages to virtual shared bridges
+            // Dynamically map all configured shared packages and their subpaths to virtual shared bridges
             for (const pkg of activeShared) {
                 alias[`^${pkg}$`] = `\0ostro:federation/shared/${pkg}`;
-                if (pkg === 'react') {
-                    alias['^react/jsx-runtime$'] = '\0ostro:federation/shared/react/jsx-runtime';
-                    alias['^react/jsx-dev-runtime$'] = '\0ostro:federation/shared/react/jsx-dev-runtime';
-                } else if (pkg === 'react-dom') {
-                    alias['^react-dom/client$'] = '\0ostro:federation/shared/react-dom/client';
-                }
+                alias[`^${pkg}/(.*)$`] = `\0ostro:federation/shared/${pkg}/$1`;
             }
 
             // Map remotes to virtual modules
@@ -219,20 +214,10 @@ export function federation(options: ModuleFederationOptions): Plugin {
             if (id === '__federation__' || id === '\0ostro:federation/runtime') {
                 return '\0ostro:federation/runtime';
             }
-            if (activeShared.includes(id)) {
-                return `\0ostro:federation/shared/${id}`;
-            }
-            if (activeShared.includes('react')) {
-                if (id === 'react/jsx-runtime') {
-                    return '\0ostro:federation/shared/react/jsx-runtime';
-                }
-                if (id === 'react/jsx-dev-runtime') {
-                    return '\0ostro:federation/shared/react/jsx-dev-runtime';
-                }
-            }
-            if (activeShared.includes('react-dom')) {
-                if (id === 'react-dom/client') {
-                    return '\0ostro:federation/shared/react-dom/client';
+            // Check exact package or subpath match for any shared library
+            for (const pkg of activeShared) {
+                if (id === pkg || id.startsWith(`${pkg}/`)) {
+                    return `\0ostro:federation/shared/${id}`;
                 }
             }
             if (id.startsWith(virtualRemotePrefix) || id.startsWith(virtualModulePrefix)) {
