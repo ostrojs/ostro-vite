@@ -1,4 +1,5 @@
 import path from 'path';
+import { createRequire } from 'module';
 import type { Plugin, UserConfig } from 'vite';
 
 export interface FederationSharedConfig {
@@ -118,6 +119,12 @@ export function federation(options: ModuleFederationOptions): Plugin {
     const remotes = options.remotes || {};
     const shared = options.shared || [];
 
+    const isRemote = Object.keys(exposes).length > 0;
+    const sharedList = Array.isArray(shared) ? shared : Object.keys(shared);
+    const genericShared = isRemote ? sharedList.filter(pkg => pkg !== 'react' && pkg !== 'react-dom') : [];
+    const shareReact = isRemote && sharedList.includes('react');
+    const shareReactDOM = isRemote && (sharedList.includes('react-dom') || sharedList.includes('react'));
+
     const virtualRemotePrefix = 'ostro:federation/remotes/';
     const virtualModulePrefix = 'ostro:federation/exposes/';
 
@@ -127,6 +134,21 @@ export function federation(options: ModuleFederationOptions): Plugin {
 
         config(userConfig: UserConfig): UserConfig {
             const alias: Record<string, string> = {};
+
+            // Map shared packages in remote apps to virtual shared bridges
+            if (shareReact) {
+                alias['^react$'] = '\0ostro:federation/shared/react';
+                alias['^react/jsx-runtime$'] = '\0ostro:federation/shared/react/jsx-runtime';
+                alias['^react/jsx-dev-runtime$'] = '\0ostro:federation/shared/react/jsx-dev-runtime';
+            }
+            if (shareReactDOM) {
+                alias['^react-dom$'] = '\0ostro:federation/shared/react-dom';
+                alias['^react-dom/client$'] = '\0ostro:federation/shared/react-dom/client';
+            }
+
+            for (const pkg of genericShared) {
+                alias[`^${pkg}$`] = `\0ostro:federation/shared/${pkg}`;
+            }
 
             // Map remotes to virtual modules
             for (const [remoteKey] of Object.entries(remotes)) {
@@ -183,6 +205,28 @@ export function federation(options: ModuleFederationOptions): Plugin {
             if (id === '__federation__' || id === '\0ostro:federation/runtime') {
                 return '\0ostro:federation/runtime';
             }
+            if (shareReact) {
+                if (id === 'react') {
+                    return '\0ostro:federation/shared/react';
+                }
+                if (id === 'react/jsx-runtime') {
+                    return '\0ostro:federation/shared/react/jsx-runtime';
+                }
+                if (id === 'react/jsx-dev-runtime') {
+                    return '\0ostro:federation/shared/react/jsx-dev-runtime';
+                }
+            }
+            if (shareReactDOM) {
+                if (id === 'react-dom') {
+                    return '\0ostro:federation/shared/react-dom';
+                }
+                if (id === 'react-dom/client') {
+                    return '\0ostro:federation/shared/react-dom/client';
+                }
+            }
+            if (genericShared.includes(id)) {
+                return `\0ostro:federation/shared/${id}`;
+            }
             if (id.startsWith(virtualRemotePrefix) || id.startsWith(virtualModulePrefix)) {
                 return `\0${id}`;
             }
@@ -199,6 +243,228 @@ export function federation(options: ModuleFederationOptions): Plugin {
         },
 
         load(id: string) {
+            if (id === '\0ostro:federation/shared/react') {
+                let localPath = 'react';
+                try {
+                    const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                    localPath = req.resolve('react');
+                } catch (_) {}
+
+                return [
+                    `import * as _LocalReact from ${JSON.stringify(localPath)};`,
+                    ``,
+                    `const _getShared = () => {`,
+                    `  if (typeof window !== 'undefined') {`,
+                    `    if (window.React) return window.React;`,
+                    `    if (window.__OSTRO_SHARED_SCOPE__?.react) {`,
+                    `      const s = window.__OSTRO_SHARED_SCOPE__.react;`,
+                    `      return s.value || (typeof s.get === 'function' ? s.get() : s);`,
+                    `    }`,
+                    `  }`,
+                    `  return _LocalReact.default || _LocalReact;`,
+                    `};`,
+                    ``,
+                    `if (typeof window !== 'undefined' && !window.React) {`,
+                    `  window.React = _LocalReact.default || _LocalReact;`,
+                    `}`,
+                    ``,
+                    `export const useState = (...args) => _getShared().useState(...args);`,
+                    `export const useEffect = (...args) => _getShared().useEffect(...args);`,
+                    `export const useContext = (...args) => _getShared().useContext(...args);`,
+                    `export const useReducer = (...args) => _getShared().useReducer(...args);`,
+                    `export const useCallback = (...args) => _getShared().useCallback(...args);`,
+                    `export const useMemo = (...args) => _getShared().useMemo(...args);`,
+                    `export const useRef = (...args) => _getShared().useRef(...args);`,
+                    `export const useImperativeHandle = (...args) => _getShared().useImperativeHandle(...args);`,
+                    `export const useLayoutEffect = (...args) => _getShared().useLayoutEffect(...args);`,
+                    `export const useInsertionEffect = (...args) => _getShared().useInsertionEffect(...args);`,
+                    `export const useDebugValue = (...args) => _getShared().useDebugValue(...args);`,
+                    `export const useDeferredValue = (...args) => _getShared().useDeferredValue(...args);`,
+                    `export const useTransition = (...args) => _getShared().useTransition(...args);`,
+                    `export const useId = (...args) => _getShared().useId(...args);`,
+                    `export const useSyncExternalStore = (...args) => _getShared().useSyncExternalStore(...args);`,
+                    `export const createElement = (...args) => _getShared().createElement(...args);`,
+                    `export const cloneElement = (...args) => _getShared().cloneElement(...args);`,
+                    `export const createContext = (...args) => _getShared().createContext(...args);`,
+                    `export const createRef = (...args) => _getShared().createRef(...args);`,
+                    `export const forwardRef = (...args) => _getShared().forwardRef(...args);`,
+                    `export const memo = (...args) => _getShared().memo(...args);`,
+                    `export const lazy = (...args) => _getShared().lazy(...args);`,
+                    `export const startTransition = (...args) => _getShared().startTransition(...args);`,
+                    `export const isValidElement = (...args) => _getShared().isValidElement(...args);`,
+                    `export const Children = new Proxy({}, { get: (_, p) => _getShared().Children?.[p] });`,
+                    `export const Fragment = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.fragment') : 0xeacb;`,
+                    `export const StrictMode = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.strict_mode') : 0xeacc;`,
+                    `export const Suspense = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.suspense') : 0xead1;`,
+                    `export const Profiler = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.profiler') : 0xead2;`,
+                    `export const Component = _LocalReact.Component || _LocalReact.default?.Component;`,
+                    `export const PureComponent = _LocalReact.PureComponent || _LocalReact.default?.PureComponent;`,
+                    `export const version = '18.3.1';`,
+                    `export const __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED = new Proxy({}, {`,
+                    `  get: (_, p) => _getShared().__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED?.[p]`,
+                    `});`,
+                    ``,
+                    `const ReactProxy = new Proxy(_LocalReact.default || _LocalReact, {`,
+                    `  get(target, prop) {`,
+                    `    const R = _getShared();`,
+                    `    const val = R ? R[prop] : target[prop];`,
+                    `    return typeof val === 'function' ? val.bind(R) : val;`,
+                    `  }`,
+                    `});`,
+                    ``,
+                    `export default ReactProxy;`
+                ].join('\n');
+            }
+
+            if (id === '\0ostro:federation/shared/react/jsx-runtime') {
+                let localPath = 'react/jsx-runtime';
+                try {
+                    const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                    localPath = req.resolve('react/jsx-runtime');
+                } catch (_) {}
+
+                return [
+                    `import * as _LocalJSX from ${JSON.stringify(localPath)};`,
+                    ``,
+                    `const _getJSX = () => {`,
+                    `  if (typeof window !== 'undefined') {`,
+                    `    if (window.ReactJSXRuntime) return window.ReactJSXRuntime;`,
+                    `  }`,
+                    `  return _LocalJSX;`,
+                    `};`,
+                    ``,
+                    `export const jsx = (...args) => _getJSX().jsx(...args);`,
+                    `export const jsxs = (...args) => _getJSX().jsxs(...args);`,
+                    `export const Fragment = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.fragment') : 0xeacb;`,
+                    `export default { jsx, jsxs, Fragment };`
+                ].join('\n');
+            }
+
+            if (id === '\0ostro:federation/shared/react/jsx-dev-runtime') {
+                let localPath = 'react/jsx-dev-runtime';
+                try {
+                    const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                    localPath = req.resolve('react/jsx-dev-runtime');
+                } catch (_) {}
+
+                return [
+                    `import * as _LocalJSXDev from ${JSON.stringify(localPath)};`,
+                    ``,
+                    `const _getJSXDev = () => {`,
+                    `  if (typeof window !== 'undefined') {`,
+                    `    if (window.ReactJSXDevRuntime) return window.ReactJSXDevRuntime;`,
+                    `  }`,
+                    `  return _LocalJSXDev;`,
+                    `};`,
+                    ``,
+                    `export const jsxDEV = (...args) => _getJSXDev().jsxDEV(...args);`,
+                    `export const Fragment = (typeof Symbol === 'function' && Symbol.for) ? Symbol.for('react.fragment') : 0xeacb;`,
+                    `export default { jsxDEV, Fragment };`
+                ].join('\n');
+            }
+
+            if (id === '\0ostro:federation/shared/react-dom') {
+                let localPath = 'react-dom';
+                try {
+                    const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                    localPath = req.resolve('react-dom');
+                } catch (_) {}
+
+                return [
+                    `import * as _LocalDOM from ${JSON.stringify(localPath)};`,
+                    ``,
+                    `const _getDOM = () => {`,
+                    `  if (typeof window !== 'undefined') {`,
+                    `    if (window.ReactDOM) return window.ReactDOM;`,
+                    `  }`,
+                    `  return _LocalDOM.default || _LocalDOM;`,
+                    `};`,
+                    ``,
+                    `export const createPortal = (...args) => _getDOM().createPortal(...args);`,
+                    `export const createRoot = (...args) => _getDOM().createRoot(...args);`,
+                    `export const hydrateRoot = (...args) => _getDOM().hydrateRoot(...args);`,
+                    `export const findDOMNode = (...args) => _getDOM().findDOMNode(...args);`,
+                    `export const flushSync = (...args) => _getDOM().flushSync(...args);`,
+                    `export const render = (...args) => _getDOM().render(...args);`,
+                    `export const hydrate = (...args) => _getDOM().hydrate(...args);`,
+                    `export const unmountComponentAtNode = (...args) => _getDOM().unmountComponentAtNode(...args);`,
+                    `export const version = '18.3.1';`,
+                    `export const __SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED = new Proxy({}, {`,
+                    `  get: (_, p) => _getDOM().__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED?.[p]`,
+                    `});`,
+                    ``,
+                    `const DOMProxy = new Proxy(_LocalDOM.default || _LocalDOM, {`,
+                    `  get(target, prop) {`,
+                    `    const D = _getDOM();`,
+                    `    const val = D ? D[prop] : target[prop];`,
+                    `    return typeof val === 'function' ? val.bind(D) : val;`,
+                    `  }`,
+                    `});`,
+                    `export default DOMProxy;`
+                ].join('\n');
+            }
+
+            if (id === '\0ostro:federation/shared/react-dom/client') {
+                let localPath = 'react-dom/client';
+                try {
+                    const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                    localPath = req.resolve('react-dom/client');
+                } catch (_) {}
+
+                return [
+                    `import * as _LocalDOMClient from ${JSON.stringify(localPath)};`,
+                    ``,
+                    `const _getDOMClient = () => {`,
+                    `  if (typeof window !== 'undefined') {`,
+                    `    if (window.ReactDOMClient) return window.ReactDOMClient;`,
+                    `    if (window.ReactDOM && window.ReactDOM.createRoot) return window.ReactDOM;`,
+                    `  }`,
+                    `  return _LocalDOMClient;`,
+                    `};`,
+                    ``,
+                    `export const createRoot = (...args) => _getDOMClient().createRoot(...args);`,
+                    `export const hydrateRoot = (...args) => _getDOMClient().hydrateRoot(...args);`,
+                    `export default { createRoot, hydrateRoot };`
+                ].join('\n');
+            }
+
+            if (id.startsWith('\0ostro:federation/shared/')) {
+                const pkgName = id.slice('\0ostro:federation/shared/'.length);
+                if (pkgName !== 'react' && !pkgName.startsWith('react/') && pkgName !== 'react-dom' && !pkgName.startsWith('react-dom/')) {
+                    let localPath = pkgName;
+                    try {
+                        const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                        localPath = req.resolve(pkgName);
+                    } catch (_) {}
+
+                    return [
+                        `import * as _LocalPkg from ${JSON.stringify(localPath)};`,
+                        ``,
+                        `const _getShared = () => {`,
+                        `  if (typeof window !== 'undefined') {`,
+                        `    const scope = window.__OSTRO_SHARED_SCOPE__;`,
+                        `    if (scope && scope['${pkgName}']) {`,
+                        `      const s = scope['${pkgName}'];`,
+                        `      return s.value || (typeof s.get === 'function' ? s.get() : s);`,
+                        `    }`,
+                        `  }`,
+                        `  return _LocalPkg.default || _LocalPkg;`,
+                        `};`,
+                        ``,
+                        `const _proxy = new Proxy(_LocalPkg.default || _LocalPkg, {`,
+                        `  get(target, prop) {`,
+                        `    const S = _getShared();`,
+                        `    const val = S ? S[prop] : target[prop];`,
+                        `    return typeof val === 'function' ? val.bind(S) : val;`,
+                        `  }`,
+                        `});`,
+                        ``,
+                        `export default _proxy;`,
+                        `export * from ${JSON.stringify(localPath)};`
+                    ].join('\n');
+                }
+            }
+
             if (id === '\0ostro:federation/runtime') {
                 return [
                     `// OstroJS Module Federation Runtime Helpers (__federation__)`,
@@ -251,6 +517,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `};`,
                     ``,
                     `export const init = (shareScope = {}) => {`,
+                    `  window.__OSTRO_SHARED_SCOPE__ = Object.assign(window.__OSTRO_SHARED_SCOPE__ || {}, shareScope);`,
                     `  window.__OSTRO_FEDERATION_SCOPES__ = window.__OSTRO_FEDERATION_SCOPES__ || {};`,
                     `  window.__OSTRO_FEDERATION_SCOPES__['${options.name}'] = shareScope;`,
                     `};`,

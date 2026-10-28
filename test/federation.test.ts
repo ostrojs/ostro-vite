@@ -172,6 +172,48 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         expect(runtimeCode).toContain('manifest.remoteEntry?.path');
     });
 
+    test('resolves and loads shared bridges for React, ReactDOM, and generic packages (axios)', () => {
+        const plugin = federation({
+            name: 'shared_remote',
+            exposes: {
+                './Card': './src/Card.tsx'
+            },
+            shared: ['react', 'react-dom', 'axios']
+        });
+
+        const reactId = (plugin as any).resolveId('react');
+        expect(reactId).toBe('\0ostro:federation/shared/react');
+        const reactCode = (plugin as any).load(reactId);
+        expect(reactCode).toContain('window.__OSTRO_SHARED_SCOPE__?.react');
+        expect(reactCode).toContain('export const useState =');
+
+        const jsxId = (plugin as any).resolveId('react/jsx-runtime');
+        expect(jsxId).toBe('\0ostro:federation/shared/react/jsx-runtime');
+        const jsxCode = (plugin as any).load(jsxId);
+        expect(jsxCode).toContain('export const jsx =');
+
+        const jsxDevId = (plugin as any).resolveId('react/jsx-dev-runtime');
+        expect(jsxDevId).toBe('\0ostro:federation/shared/react/jsx-dev-runtime');
+        const jsxDevCode = (plugin as any).load(jsxDevId);
+        expect(jsxDevCode).toContain('export const jsxDEV =');
+
+        const domId = (plugin as any).resolveId('react-dom');
+        expect(domId).toBe('\0ostro:federation/shared/react-dom');
+        const domCode = (plugin as any).load(domId);
+        expect(domCode).toContain('export const createPortal =');
+
+        const domClientId = (plugin as any).resolveId('react-dom/client');
+        expect(domClientId).toBe('\0ostro:federation/shared/react-dom/client');
+        const domClientCode = (plugin as any).load(domClientId);
+        expect(domClientCode).toContain('export const createRoot =');
+
+        const axiosId = (plugin as any).resolveId('axios');
+        expect(axiosId).toBe('\0ostro:federation/shared/axios');
+        const axiosCode = (plugin as any).load(axiosId);
+        expect(axiosCode).toContain("scope['axios']");
+        expect(axiosCode).toContain('export default _proxy;');
+    });
+
     test('preserves user chunkFileNames function and configures filename', () => {
         const plugin = federation({
             name: 'header_remote',
