@@ -1,3 +1,4 @@
+import path from 'path';
 import type { Plugin, UserConfig } from 'vite';
 
 export interface FederationSharedConfig {
@@ -7,6 +8,7 @@ export interface FederationSharedConfig {
     requiredVersion?: string;
     singleton?: boolean;
     strictVersion?: boolean;
+    packageName?: string;
 }
 
 export type FederationShared =
@@ -16,13 +18,29 @@ export type FederationShared =
 export interface RemoteConfig {
     external: string;
     externalType?: 'url' | 'promise';
-    format?: 'esm' | 'var';
+    format?: 'esm' | 'var' | 'systemjs';
     from?: 'vite' | 'webpack';
 }
 
 export type FederationRemotes = Record<string, string | RemoteConfig>;
 
 export type FederationExposes = Record<string, string>;
+
+export interface ModuleFederationManifest {
+    id: string;
+    name: string;
+    meta?: Record<string, any>;
+    remoteEntry?: {
+        name: string;
+        path: string;
+        type?: string;
+    };
+    filename?: string;
+    exposes?: FederationExposes;
+    remotes?: FederationRemotes;
+    shared?: FederationShared;
+    assets?: string[];
+}
 
 export interface ModuleFederationOptions {
     /**
@@ -57,6 +75,7 @@ export interface ModuleFederationOptions {
      * ```ts
      * remotes: {
      *   adminDashboard: 'http://localhost:5174/remoteEntry.js',
+     *   ordersApp: 'http://localhost:5175/mf-manifest.json',
      * }
      * ```
      */
@@ -110,10 +129,13 @@ export function federation(options: ModuleFederationOptions): Plugin {
             const alias: Record<string, string> = {};
 
             // Map remotes to virtual modules
-            for (const [remoteKey, remoteVal] of Object.entries(remotes)) {
+            for (const [remoteKey] of Object.entries(remotes)) {
                 alias[`^${remoteKey}$`] = `${virtualRemotePrefix}${remoteKey}`;
                 alias[`^${remoteKey}/(.*)$`] = `${virtualRemotePrefix}${remoteKey}/$1`;
             }
+
+            // Expose runtime helper module
+            alias['^__federation__$'] = '\0ostro:federation/runtime';
 
             return {
                 build: {
@@ -145,9 +167,30 @@ export function federation(options: ModuleFederationOptions): Plugin {
             };
         },
 
+        buildStart() {
+            if (Object.keys(exposes).length > 0) {
+                this.emitFile({
+                    type: 'chunk',
+                    id: filename,
+                    name: filename.replace(/\.js$/, ''),
+                    fileName: `assets/${filename}`,
+                    preserveSignature: 'exports-only'
+                });
+            }
+        },
+
         resolveId(id: string) {
+            if (id === '__federation__' || id === '\0ostro:federation/runtime') {
+                return '\0ostro:federation/runtime';
+            }
             if (id.startsWith(virtualRemotePrefix) || id.startsWith(virtualModulePrefix)) {
                 return `\0${id}`;
+            }
+            // Match any import targeting a configured remote: e.g. "freshRemoteApp/UserCard" or "freshRemoteApp"
+            for (const remoteKey of Object.keys(remotes)) {
+                if (id === remoteKey || id.startsWith(`${remoteKey}/`)) {
+                    return `\0${virtualRemotePrefix}${id}`;
+                }
             }
             if (id === filename || id === `/${filename}`) {
                 return `\0ostro:federation/${filename}`;
@@ -156,10 +199,42 @@ export function federation(options: ModuleFederationOptions): Plugin {
         },
 
         load(id: string) {
+            if (id === '\0ostro:federation/runtime') {
+                return [
+                    `// OstroJS Module Federation Runtime Helpers (__federation__)`,
+                    `const registeredRemotes = {};`,
+                    ``,
+                    `export function __federation_method_setRemote(name, config) {`,
+                    `  registeredRemotes[name] = config;`,
+                    `}`,
+                    ``,
+                    `export async function __federation_method_getRemote(name, modulePath = '') {`,
+                    `  const config = registeredRemotes[name] || {};`,
+                    `  let url = typeof config.url === 'function' ? await config.url() : (config.url || config.external);`,
+                    `  if (url && url.endsWith('.json')) {`,
+                    `    const res = await fetch(url);`,
+                    `    const manifest = await res.json();`,
+                    `    const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);`,
+                    `    url = baseUrl + (manifest.remoteEntry?.path || manifest.filename || 'remoteEntry.js');`,
+                    `  }`,
+                    `  const container = await import(/* @vite-ignore */ url);`,
+                    `  if (container.init) {`,
+                    `    await container.init(window.__OSTRO_SHARED_SCOPE__ || {});`,
+                    `  }`,
+                    `  return modulePath ? await container.get(modulePath) : container;`,
+                    `}`,
+                    ``,
+                    `export const setRemote = __federation_method_setRemote;`,
+                    `export const getRemote = __federation_method_getRemote;`,
+                    `export default { setRemote, getRemote, __federation_method_setRemote, __federation_method_getRemote };`
+                ].join('\n');
+            }
+
             if (id === `\0ostro:federation/${filename}`) {
                 const exposeExports = Object.entries(exposes).map(([exposeKey, exposePath]) => {
                     const cleanKey = exposeKey.replace(/^\.\//, '');
-                    return `  './${cleanKey}': () => import('${exposePath}')`;
+                    const resolvedPath = path.isAbsolute(exposePath) ? exposePath : path.resolve(process.cwd(), exposePath);
+                    return `  './${cleanKey}': () => import('${resolvedPath}')`;
                 }).join(',\n');
 
                 return [
@@ -180,6 +255,11 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `  window.__OSTRO_FEDERATION_SCOPES__['${options.name}'] = shareScope;`,
                     `};`,
                     ``,
+                    `// Interop for Webpack container consumers`,
+                    `if (typeof window !== 'undefined') {`,
+                    `  window['${options.name}'] = { get, init };`,
+                    `}`,
+                    ``,
                     `export default { get, init };`
                 ].join('\n');
             }
@@ -190,12 +270,35 @@ export function federation(options: ModuleFederationOptions): Plugin {
                 const remoteName = parts[0];
                 const subPath = parts.slice(1).join('/');
                 const remoteVal = remotes[remoteName];
-                const remoteUrl = typeof remoteVal === 'string' ? remoteVal : (remoteVal?.external || '');
+                const isConfigObj = typeof remoteVal === 'object' && remoteVal !== null;
+                const isPromiseType = isConfigObj && remoteVal.externalType === 'promise';
+                const fromWebpack = isConfigObj && remoteVal.from === 'webpack';
+                const remoteExpr = typeof remoteVal === 'string' ? remoteVal : (remoteVal?.external || '');
+
+                const resolveUrlCode = isPromiseType
+                    ? `  let url = await (${remoteExpr});`
+                    : `  let url = '${remoteExpr}';`;
 
                 return [
                     `// Remote bridge for ${remoteSpecifier}`,
-                    `async function loadRemote() {`,
-                    `  const container = await import(/* @vite-ignore */ '${remoteUrl}');`,
+                    `async function loadRemoteContainer() {`,
+                    resolveUrlCode,
+                    `  // If manifest URL is provided (MFT support), parse the manifest to resolve remoteEntry.js`,
+                    `  if (url && url.endsWith('.json')) {`,
+                    `    const res = await fetch(url);`,
+                    `    const manifest = await res.json();`,
+                    `    const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);`,
+                    `    url = baseUrl + (manifest.remoteEntry?.path || manifest.filename || 'remoteEntry.js');`,
+                    `  }`,
+                    fromWebpack
+                        ? [
+                            `  // Webpack container interop`,
+                            `  if (!window['${remoteName}']) {`,
+                            `    await import(/* @vite-ignore */ url);`,
+                            `  }`,
+                            `  const container = window['${remoteName}'];`
+                        ].join('\n')
+                        : `  const container = await import(/* @vite-ignore */ url);`,
                     `  if (container.init) {`,
                     `    await container.init(window.__OSTRO_SHARED_SCOPE__ || {});`,
                     `  }`,
@@ -203,26 +306,39 @@ export function federation(options: ModuleFederationOptions): Plugin {
                         ? `  return await container.get('./${subPath}');`
                         : `  return container;`,
                     `}`,
-                    `const module = await loadRemote();`,
+                    `const module = await loadRemoteContainer();`,
                     `export default module.default || module;`,
-                    `export * from '${remoteUrl}';`
+                    `export * from '${remoteExpr}';`
                 ].join('\n');
             }
 
             return null;
         },
 
-        generateBundle(_outputOptions, _bundle) {
+        generateBundle(_outputOptions, bundle) {
             if (options.manifest !== false && (Object.keys(exposes).length > 0 || Object.keys(remotes).length > 0)) {
                 const manifestName = typeof options.manifest === 'string' ? options.manifest : 'mf-manifest.json';
-                const manifestData = {
+                const assets: string[] = Object.keys(bundle);
+
+                const manifestData: ModuleFederationManifest = {
                     id: options.name || 'ostro-federation',
                     name: options.name,
+                    meta: {
+                        framework: 'OstroJS',
+                        buildTime: new Date().toISOString()
+                    },
+                    remoteEntry: {
+                        name: filename,
+                        path: filename,
+                        type: 'esm'
+                    },
                     filename,
                     exposes,
                     remotes,
-                    shared
+                    shared,
+                    assets
                 };
+
                 this.emitFile({
                     type: 'asset',
                     fileName: manifestName,

@@ -46,6 +46,17 @@ describe('Vite Module Federation plugin for OstroJS', () => {
             }
         });
 
+        // Test buildStart
+        const emittedChunks: any[] = [];
+        const mockContext = {
+            emitFile: (c: any) => emittedChunks.push(c)
+        };
+        if ((plugin as any).buildStart) {
+            (plugin as any).buildStart.call(mockContext);
+            expect(emittedChunks.length).toBe(1);
+            expect(emittedChunks[0].type).toBe('chunk');
+        }
+
         // Test resolveId
         const resolvedId = (plugin as any).resolveId('customRemoteEntry.js');
         expect(resolvedId).toBe('\0ostro:federation/customRemoteEntry.js');
@@ -53,8 +64,10 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         // Test load
         const code = (plugin as any).load('\0ostro:federation/customRemoteEntry.js');
         expect(code).toContain('OstroJS Module Federation remoteEntry: ui_components');
-        expect(code).toContain("'./Button': () => import('./resources/assets/js/components/Button.tsx')");
-        expect(code).toContain("'./Navbar': () => import('./resources/assets/js/components/Navbar.tsx')");
+        expect(code).toContain("'./Button': () => import(");
+        expect(code).toContain("resources/assets/js/components/Button.tsx')");
+        expect(code).toContain("'./Navbar': () => import(");
+        expect(code).toContain("resources/assets/js/components/Navbar.tsx')");
         expect(code).toContain('export const get =');
         expect(code).toContain('export const init =');
     });
@@ -71,7 +84,8 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         expect(rootId).toBe('\0ostro:federation/remotes/mfeStore');
 
         const codeRoot = (plugin as any).load('\0ostro:federation/remotes/mfeStore');
-        expect(codeRoot).toContain("import(/* @vite-ignore */ 'http://localhost:5180/assets/remoteEntry.js')");
+        expect(codeRoot).toContain("let url = 'http://localhost:5180/assets/remoteEntry.js';");
+        expect(codeRoot).toContain('await import(/* @vite-ignore */ url);');
         expect(codeRoot).toContain('return container;');
 
         const subId = (plugin as any).resolveId('ostro:federation/remotes/mfeStore/Cart');
@@ -96,7 +110,12 @@ describe('Vite Module Federation plugin for OstroJS', () => {
             emitFile: (f: any) => emittedFiles.push(f)
         };
 
-        (plugin as any).generateBundle.call(mockContext, {}, {});
+        const bundleMock = {
+            'assets/UserWidget-abc.js': {},
+            'assets/app-123.css': {}
+        };
+
+        (plugin as any).generateBundle.call(mockContext, {}, bundleMock);
 
         expect(emittedFiles.length).toBe(1);
         expect(emittedFiles[0].fileName).toBe('custom-manifest.json');
@@ -104,6 +123,53 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         expect(manifest.name).toBe('federated_core');
         expect(manifest.exposes['./UserWidget']).toBe('./resources/assets/js/UserWidget.tsx');
         expect(manifest.shared).toEqual(['react', 'react-dom']);
+        expect(manifest.assets).toContain('assets/UserWidget-abc.js');
+        expect(manifest.remoteEntry.name).toBe('remoteEntry.js');
+        expect(manifest.meta.framework).toBe('OstroJS');
+    });
+
+    test('supports promise remotes, manifest-based discovery, and webpack interop', () => {
+        const plugin = federation({
+            name: 'dynamic_host',
+            remotes: {
+                promiseRemote: {
+                    external: 'Promise.resolve("http://localhost:6000/remoteEntry.js")',
+                    externalType: 'promise'
+                },
+                webpackRemote: {
+                    external: 'http://localhost:7000/remoteEntry.js',
+                    from: 'webpack'
+                },
+                manifestRemote: {
+                    external: 'http://localhost:8000/mf-manifest.json'
+                }
+            }
+        });
+
+        const promiseCode = (plugin as any).load('\0ostro:federation/remotes/promiseRemote/Button');
+        expect(promiseCode).toContain('await (Promise.resolve("http://localhost:6000/remoteEntry.js"))');
+        expect(promiseCode).toContain("container.get('./Button')");
+
+        const webpackCode = (plugin as any).load('\0ostro:federation/remotes/webpackRemote/Nav');
+        expect(webpackCode).toContain("window['webpackRemote']");
+
+        const manifestCode = (plugin as any).load('\0ostro:federation/remotes/manifestRemote/Header');
+        expect(manifestCode).toContain("if (url && url.endsWith('.json'))");
+        expect(manifestCode).toContain('await fetch(url)');
+    });
+
+    test('provides __federation__ runtime helpers for dynamic runtime remote loading', () => {
+        const plugin = federation({
+            name: 'runtime_host'
+        });
+
+        const runtimeId = (plugin as any).resolveId('__federation__');
+        expect(runtimeId).toBe('\0ostro:federation/runtime');
+
+        const runtimeCode = (plugin as any).load('\0ostro:federation/runtime');
+        expect(runtimeCode).toContain('__federation_method_setRemote');
+        expect(runtimeCode).toContain('__federation_method_getRemote');
+        expect(runtimeCode).toContain('manifest.remoteEntry?.path');
     });
 
     test('preserves user chunkFileNames function and configures filename', () => {
