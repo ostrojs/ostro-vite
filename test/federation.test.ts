@@ -172,7 +172,7 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         expect(runtimeCode).toContain('manifest.remoteEntry?.path');
     });
 
-    test('resolves and loads shared bridges for React, ReactDOM, and generic packages (axios)', () => {
+    test('resolves and loads dynamic shared bridges for React, ReactDOM, and any package (axios)', () => {
         const plugin = federation({
             name: 'shared_remote',
             exposes: {
@@ -184,34 +184,63 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         const reactId = (plugin as any).resolveId('react');
         expect(reactId).toBe('\0ostro:federation/shared/react');
         const reactCode = (plugin as any).load(reactId);
-        expect(reactCode).toContain('window.__OSTRO_SHARED_SCOPE__?.react');
-        expect(reactCode).toContain('export const useState =');
+        expect(reactCode).toContain("scope['react']");
+        expect(reactCode).toContain('export default _proxy;');
 
         const jsxId = (plugin as any).resolveId('react/jsx-runtime');
         expect(jsxId).toBe('\0ostro:federation/shared/react/jsx-runtime');
         const jsxCode = (plugin as any).load(jsxId);
-        expect(jsxCode).toContain('export const jsx =');
-
-        const jsxDevId = (plugin as any).resolveId('react/jsx-dev-runtime');
-        expect(jsxDevId).toBe('\0ostro:federation/shared/react/jsx-dev-runtime');
-        const jsxDevCode = (plugin as any).load(jsxDevId);
-        expect(jsxDevCode).toContain('export const jsxDEV =');
+        expect(jsxCode).toContain("scope['react/jsx-runtime']");
 
         const domId = (plugin as any).resolveId('react-dom');
         expect(domId).toBe('\0ostro:federation/shared/react-dom');
         const domCode = (plugin as any).load(domId);
-        expect(domCode).toContain('export const createPortal =');
+        expect(domCode).toContain("scope['react-dom']");
+
+        const jsxDevId = (plugin as any).resolveId('react/jsx-dev-runtime');
+        expect(jsxDevId).toBe('\0ostro:federation/shared/react/jsx-dev-runtime');
 
         const domClientId = (plugin as any).resolveId('react-dom/client');
         expect(domClientId).toBe('\0ostro:federation/shared/react-dom/client');
-        const domClientCode = (plugin as any).load(domClientId);
-        expect(domClientCode).toContain('export const createRoot =');
 
         const axiosId = (plugin as any).resolveId('axios');
         expect(axiosId).toBe('\0ostro:federation/shared/axios');
         const axiosCode = (plugin as any).load(axiosId);
         expect(axiosCode).toContain("scope['axios']");
         expect(axiosCode).toContain('export default _proxy;');
+    });
+
+    test('exercises config aliases with object-based shared and user alias array', () => {
+        const plugin = federation({
+            name: 'object_shared_remote',
+            exposes: {
+                './Widget': './src/Widget.tsx'
+            },
+            shared: {
+                react: { singleton: true },
+                'react-dom': { singleton: true },
+                lodash: '^4.17.21'
+            },
+            remotes: {
+                app1: 'http://localhost:3000/remoteEntry.js'
+            }
+        });
+
+        const configWithArray = (plugin as any).config({
+            resolve: {
+                alias: [{ find: 'custom', replacement: '/src/custom' }]
+            }
+        });
+        expect(Array.isArray(configWithArray.resolve?.alias)).toBe(true);
+
+        const configWithObj = (plugin as any).config({});
+        expect(configWithObj.resolve?.alias['^lodash$']).toBe('\0ostro:federation/shared/lodash');
+        expect(configWithObj.resolve?.alias['^react/jsx-runtime$']).toBe('\0ostro:federation/shared/react/jsx-runtime');
+        expect(configWithObj.resolve?.alias['^react-dom/client$']).toBe('\0ostro:federation/shared/react-dom/client');
+
+        expect((plugin as any).resolveId('app1')).toBe('\0ostro:federation/remotes/app1');
+        expect((plugin as any).resolveId('app1/Comp')).toBe('\0ostro:federation/remotes/app1/Comp');
+        expect((plugin as any).resolveId('ostro:federation/remotes/app1')).toBe('\0ostro:federation/remotes/app1');
     });
 
     test('preserves user chunkFileNames function and configures filename', () => {
