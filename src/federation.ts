@@ -335,7 +335,8 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     if (mod && (typeof mod === 'object' || typeof mod === 'function')) {
                         const isFn = typeof mod === 'function';
                         exportKeys = Object.keys(mod).filter(k => {
-                            if (k === 'default' || k.startsWith('__')) return false;
+                            if (k === 'default') return false;
+                            if (k.startsWith('__') && k !== '__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED') return false;
                             return !isFn || !nonStaticMethodNames.has(k);
                         });
                     }
@@ -352,11 +353,24 @@ export function federation(options: ModuleFederationOptions): Plugin {
                 const namedExportsCode = exportKeys.map(k => {
                     const safeIdentifier = (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k) && !reservedWords.has(k)) ? k : null;
                     if (!safeIdentifier) return '';
-                    return `export const ${safeIdentifier} = (...args) => {
-  const S = _getShared();
-  const target = (S && typeof S.${safeIdentifier} !== 'undefined') ? S.${safeIdentifier} : _LocalPkg.${safeIdentifier};
-  return typeof target === 'function' ? target.apply(S || _LocalPkg, args) : target;
-};`;
+                    return `export const ${safeIdentifier} = new Proxy(function() {}, {
+  apply(target, thisArg, args) {
+    const S = _getShared();
+    const fn = (S && typeof S.${safeIdentifier} !== 'undefined') ? S.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+    return typeof fn === 'function' ? fn.apply(S || _LocalPkg, args) : fn;
+  },
+  get(target, prop) {
+    const S = _getShared();
+    const obj = (S && typeof S.${safeIdentifier} !== 'undefined') ? S.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+    if (obj && typeof obj === 'object') {
+      return obj[prop];
+    }
+    if (typeof obj === 'function' && typeof obj[prop] === 'function') {
+      return obj[prop].bind(obj);
+    }
+    return obj ? obj[prop] : target[prop];
+  }
+});`;
                 }).filter(Boolean).join('\n');
 
                 const importFallback = sharedCfg.import !== false;
@@ -395,6 +409,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `  }`,
                     `});`,
                     ``,
+                    `export const __esModule = true;`,
                     `export default _proxy;`,
                     namedExportsCode
                 ].filter(Boolean).join('\n');
