@@ -356,12 +356,14 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     return `export const ${safeIdentifier} = new Proxy(function() {}, {
   apply(target, thisArg, args) {
     const S = _getShared();
-    const fn = (S && typeof S.${safeIdentifier} !== 'undefined') ? S.${safeIdentifier} : _LocalPkg.${safeIdentifier};
-    return typeof fn === 'function' ? fn.apply(S || _LocalPkg, args) : fn;
+    const resolved = (S && S !== _proxy) ? S : _LocalPkg;
+    const fn = (resolved && typeof resolved.${safeIdentifier} !== 'undefined') ? resolved.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+    return typeof fn === 'function' ? fn.apply(resolved || _LocalPkg, args) : fn;
   },
   get(target, prop) {
     const S = _getShared();
-    const obj = (S && typeof S.${safeIdentifier} !== 'undefined') ? S.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+    const resolved = (S && S !== _proxy) ? S : _LocalPkg;
+    const obj = (resolved && typeof resolved.${safeIdentifier} !== 'undefined') ? resolved.${safeIdentifier} : _LocalPkg.${safeIdentifier};
     if (obj && typeof obj === 'object') {
       return obj[prop];
     }
@@ -386,6 +388,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
                 return [
                     localImportLine,
                     ``,
+                    `let _proxy;`,
                     `const _getShared = () => {`,
                     `  if (typeof window !== 'undefined') {`,
                     `    window.__OSTRO_FEDERATION_SCOPES__ = window.__OSTRO_FEDERATION_SCOPES__ || {};`,
@@ -401,11 +404,12 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `  ${fallbackReturn}`,
                     `};`,
                     ``,
-                    `const _proxy = new Proxy(_LocalPkg.default || _LocalPkg, {`,
+                    `_proxy = new Proxy(_LocalPkg.default || _LocalPkg, {`,
                     `  get(target, prop) {`,
                     `    const S = _getShared();`,
-                    `    const val = (S && typeof S[prop] !== 'undefined') ? S[prop] : target[prop];`,
-                    `    return typeof val === 'function' ? val.bind(S || target) : val;`,
+                    `    const resolved = (S && S !== _proxy) ? S : target;`,
+                    `    const val = (resolved && typeof resolved[prop] !== 'undefined') ? resolved[prop] : target[prop];`,
+                    `    return typeof val === 'function' ? val.bind(resolved || target) : val;`,
                     `  }`,
                     `});`,
                     ``,
