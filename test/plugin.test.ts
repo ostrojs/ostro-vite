@@ -27,9 +27,9 @@ describe('@ostro/vite plugin', () => {
 
         const resolved = ostroPlugin.config({} as any, { command: 'build', mode: 'production' });
         expect(resolved.build?.manifest).toBe('manifest.json');
-        expect(resolved.build?.outDir).toBe('public/build');
+        expect(resolved.build?.outDir).toBe('public');
         expect(resolved.build?.rollupOptions?.input).toBe('resources/assets/js/app.ts');
-        expect(resolved.base).toBe('/build/');
+        expect(resolved.base).toBe('/');
         expect(resolved.resolve.alias).toBeDefined();
     });
 

@@ -248,7 +248,7 @@ function resolvePluginConfig(config: string | string[] | PluginConfig): Required
     }
 
     const publicDirectory = config.publicDirectory ?? 'public';
-    const buildDirectory = config.buildDirectory === false ? '' : (config.buildDirectory ?? 'build');
+    const buildDirectory = config.buildDirectory ? config.buildDirectory : '';
     const defaultEmptyOutDir = config.emptyOutDir ?? (buildDirectory !== '');
 
     return {
