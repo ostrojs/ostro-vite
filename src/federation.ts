@@ -11,6 +11,10 @@ export interface FederationSharedConfig {
     singleton?: boolean;
     strictVersion?: boolean;
     packageName?: string;
+    shareKey?: string;
+    packagePath?: string;
+    generate?: boolean;
+    modulePreload?: boolean;
 }
 
 export type FederationShared =
@@ -22,11 +26,18 @@ export interface RemoteConfig {
     externalType?: 'url' | 'promise';
     format?: 'esm' | 'var' | 'systemjs';
     from?: 'vite' | 'webpack';
+    shareScope?: string;
 }
 
 export type FederationRemotes = Record<string, string | RemoteConfig>;
 
-export type FederationExposes = Record<string, string>;
+export interface ExposeConfig {
+    import: string;
+    name?: string;
+    dontAppendStylesToHead?: boolean;
+}
+
+export type FederationExposes = Record<string, string | ExposeConfig>;
 
 export interface ModuleFederationManifest {
     id: string;
@@ -41,6 +52,7 @@ export interface ModuleFederationManifest {
     exposes?: FederationExposes;
     remotes?: FederationRemotes;
     shared?: FederationShared;
+    shareScope?: string;
     assets?: string[];
 }
 
@@ -56,6 +68,13 @@ export interface ModuleFederationOptions {
      * @default 'remoteEntry.js'
      */
     filename?: string;
+
+    /**
+     * Default share scope pool name (e.g. 'default').
+     *
+     * @default 'default'
+     */
+    shareScope?: string;
 
     /**
      * Modules exposed to other remote or host applications.
@@ -84,7 +103,7 @@ export interface ModuleFederationOptions {
     remotes?: FederationRemotes;
 
     /**
-     * Shared libraries between Host and Remotes (e.g. ['react', 'react-dom']).
+     * Shared libraries between Host and Remotes (e.g. ['react', 'react-dom'] or object config).
      */
     shared?: FederationShared;
 
@@ -101,6 +120,16 @@ export interface ModuleFederationOptions {
      * @default 'esnext'
      */
     target?: string;
+
+    /**
+     * Custom chunk naming, splitting, and manual chunk aliasing like Webpack.
+     */
+    chunks?: {
+        chunkFileNames?: string | ((chunkInfo: any) => string);
+        assetFileNames?: string | ((chunkInfo: any) => string);
+        entryFileNames?: string | ((chunkInfo: any) => string);
+        manualChunks?: Record<string, string[]> | ((id: string) => string | void);
+    };
 }
 
 /**
@@ -119,15 +148,34 @@ export function federation(options: ModuleFederationOptions): Plugin {
     const exposes = options.exposes || {};
     const remotes = options.remotes || {};
     const shared = options.shared || [];
+    const defaultShareScope = options.shareScope || 'default';
 
     const isRemote = Object.keys(exposes).length > 0;
     const sharedList = Array.isArray(shared) ? shared : Object.keys(shared);
     const activeShared = isRemote ? sharedList : [];
 
+    // Helper to get normalized shared configuration
+    const getSharedConfig = (pkgName: string): FederationSharedConfig => {
+        if (!Array.isArray(shared) && typeof shared === 'object' && shared[pkgName]) {
+            const val = shared[pkgName];
+            return typeof val === 'string' ? { version: val } : val;
+        }
+        return {};
+    };
+
     const virtualRemotePrefix = 'ostro:federation/remotes/';
     const virtualModulePrefix = 'ostro:federation/exposes/';
 
     const resolvePackageEntry = (pkgName: string): string => {
+        const sharedCfg = getSharedConfig(pkgName);
+        if (sharedCfg.packagePath) {
+            const customPath = path.isAbsolute(sharedCfg.packagePath)
+                ? sharedCfg.packagePath
+                : path.resolve(process.cwd(), sharedCfg.packagePath);
+            if (fs.existsSync(customPath)) {
+                return customPath;
+            }
+        }
         try {
             const pkgJsonPath = path.resolve(process.cwd(), 'node_modules', pkgName, 'package.json');
             if (fs.existsSync(pkgJsonPath)) {
@@ -165,24 +213,43 @@ export function federation(options: ModuleFederationOptions): Plugin {
                 alias[`^${remoteKey}/(.*)$`] = `${virtualRemotePrefix}${remoteKey}/$1`;
             }
 
-            // Expose runtime helper module
+            // Expose runtime helper module (supports both '__federation__' and 'virtual:__federation__')
             alias['^__federation__$'] = '\0ostro:federation/runtime';
+            alias['^virtual:__federation__$'] = '\0ostro:federation/runtime';
+
+            // Build manualChunks map or delegate if provided via options.chunks or exposed modules
+            const existingOutput = userConfig.build?.rollupOptions?.output;
+            const outputObj = !Array.isArray(existingOutput) && existingOutput ? existingOutput : {};
+
+            const customChunkFileNames = options.chunks?.chunkFileNames || outputObj.chunkFileNames;
+            const customAssetFileNames = options.chunks?.assetFileNames || outputObj.assetFileNames;
+            const customEntryFileNames = options.chunks?.entryFileNames || outputObj.entryFileNames;
+
+            // Compute exposed chunk aliases if desired (like Webpack's deterministic chunk aliasing)
+            const manualChunks = options.chunks?.manualChunks || outputObj.manualChunks;
 
             return {
                 build: {
                     target,
+                    modulePreload: userConfig.build?.modulePreload ?? false,
                     rollupOptions: {
                         output: {
-                            // Ensure shared packages can be preserved in distinct chunks
+                            ...outputObj,
+                            ...(customAssetFileNames ? { assetFileNames: customAssetFileNames } : {}),
+                            ...(customEntryFileNames ? { entryFileNames: customEntryFileNames } : {}),
+                            ...(manualChunks ? { manualChunks } : {}),
+                            // Ensure remoteEntry.js stays at build root and user chunks follow custom naming
                             chunkFileNames: (chunkInfo) => {
                                 if (chunkInfo.name === filename.replace(/\.js$/, '')) {
                                     return filename;
                                 }
-                                return userConfig.build?.rollupOptions?.output &&
-                                    !Array.isArray(userConfig.build.rollupOptions.output) &&
-                                    typeof userConfig.build.rollupOptions.output.chunkFileNames === 'string'
-                                    ? userConfig.build.rollupOptions.output.chunkFileNames
-                                    : 'assets/[name]-[hash].js';
+                                if (typeof customChunkFileNames === 'function') {
+                                    return customChunkFileNames(chunkInfo);
+                                }
+                                if (typeof customChunkFileNames === 'string') {
+                                    return customChunkFileNames;
+                                }
+                                return 'assets/[name]-[hash].js';
                             }
                         }
                     }
@@ -204,14 +271,14 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     type: 'chunk',
                     id: filename,
                     name: filename.replace(/\.js$/, ''),
-                    fileName: `assets/${filename}`,
+                    fileName: filename,
                     preserveSignature: 'exports-only'
                 });
             }
         },
 
         resolveId(id: string) {
-            if (id === '__federation__' || id === '\0ostro:federation/runtime') {
+            if (id === '__federation__' || id === 'virtual:__federation__' || id === '\0ostro:federation/runtime') {
                 return '\0ostro:federation/runtime';
             }
             // Check exact package or subpath match for any shared library
@@ -239,35 +306,98 @@ export function federation(options: ModuleFederationOptions): Plugin {
             if (id.startsWith('\0ostro:federation/shared/')) {
                 const pkgName = id.slice('\0ostro:federation/shared/'.length);
                 const localPath = resolvePackageEntry(pkgName);
+                const sharedCfg = getSharedConfig(pkgName);
+                const shareKey = sharedCfg.shareKey || pkgName;
+                const shareScopeName = sharedCfg.shareScope || defaultShareScope;
+                const isSingleton = !!sharedCfg.singleton;
+                const strictVersion = !!sharedCfg.strictVersion;
+                const requiredVersion = sharedCfg.requiredVersion ? `'${sharedCfg.requiredVersion}'` : 'null';
+
+                const nonStaticMethodNames = new Set([
+                    'constructor', 'request', '_request', 'getUri', 'get', 'head', 'options',
+                    'post', 'postForm', 'put', 'putForm', 'patch', 'patchForm', 'query',
+                    'defaults', 'interceptors'
+                ]);
+
+                // Dynamically inspect all named exports from the local package to generate delegated proxies
+                let exportKeys: string[] = [];
+                try {
+                    const req = createRequire(path.resolve(process.cwd(), 'package.json'));
+                    let mod: any;
+                    try {
+                        const resolvedEntry = req.resolve(pkgName);
+                        mod = req(resolvedEntry);
+                    } catch (_) {
+                        if (localPath && fs.existsSync(localPath)) {
+                            mod = req(localPath);
+                        }
+                    }
+                    if (mod && (typeof mod === 'object' || typeof mod === 'function')) {
+                        const isFn = typeof mod === 'function';
+                        exportKeys = Object.keys(mod).filter(k => {
+                            if (k === 'default' || k.startsWith('__')) return false;
+                            return !isFn || !nonStaticMethodNames.has(k);
+                        });
+                    }
+                } catch (_) {}
+
+                const reservedWords = new Set([
+                    'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default',
+                    'delete', 'do', 'else', 'export', 'extends', 'finally', 'for', 'function',
+                    'if', 'import', 'in', 'instanceof', 'new', 'return', 'super', 'switch',
+                    'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
+                    'let', 'static', 'enum', 'await'
+                ]);
+
+                const namedExportsCode = exportKeys.map(k => {
+                    const safeIdentifier = (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k) && !reservedWords.has(k)) ? k : null;
+                    if (!safeIdentifier) return '';
+                    return `export const ${safeIdentifier} = (...args) => {
+  const S = _getShared();
+  const target = (S && typeof S.${safeIdentifier} !== 'undefined') ? S.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+  return typeof target === 'function' ? target.apply(S || _LocalPkg, args) : target;
+};`;
+                }).filter(Boolean).join('\n');
+
+                const importFallback = sharedCfg.import !== false;
+
+                const localImportLine = importFallback
+                    ? `import * as _LocalPkg from ${JSON.stringify(localPath)};`
+                    : `const _LocalPkg = {};`;
+
+                const fallbackReturn = importFallback
+                    ? `return _LocalPkg.default || _LocalPkg;`
+                    : `throw new Error('Shared package "${pkgName}" is marked with import: false and must be provided by the host application.');`;
 
                 return [
-                    `import * as _LocalPkg from ${JSON.stringify(localPath)};`,
+                    localImportLine,
                     ``,
                     `const _getShared = () => {`,
                     `  if (typeof window !== 'undefined') {`,
-                    `    const scope = window.__OSTRO_SHARED_SCOPE__;`,
-                    `    if (scope && scope['${pkgName}']) {`,
-                    `      const s = scope['${pkgName}'];`,
+                    `    window.__OSTRO_FEDERATION_SCOPES__ = window.__OSTRO_FEDERATION_SCOPES__ || {};`,
+                    `    const pool = window.__OSTRO_FEDERATION_SCOPES__['${shareScopeName}'] || window.__OSTRO_SHARED_SCOPE__;`,
+                    `    if (pool && pool['${shareKey}']) {`,
+                    `      const s = pool['${shareKey}'];`,
                     `      return s.value || (typeof s.get === 'function' ? s.get() : s);`,
                     `    }`,
-                    `    if (window['${pkgName}']) {`,
-                    `      return window['${pkgName}'];`,
+                    `    if (window['${shareKey}']) {`,
+                    `      return window['${shareKey}'];`,
                     `    }`,
                     `  }`,
-                    `  return _LocalPkg.default || _LocalPkg;`,
+                    `  ${fallbackReturn}`,
                     `};`,
                     ``,
                     `const _proxy = new Proxy(_LocalPkg.default || _LocalPkg, {`,
                     `  get(target, prop) {`,
                     `    const S = _getShared();`,
-                    `    const val = S ? S[prop] : target[prop];`,
-                    `    return typeof val === 'function' ? val.bind(S) : val;`,
+                    `    const val = (S && typeof S[prop] !== 'undefined') ? S[prop] : target[prop];`,
+                    `    return typeof val === 'function' ? val.bind(S || target) : val;`,
                     `  }`,
                     `});`,
                     ``,
                     `export default _proxy;`,
-                    `export * from ${JSON.stringify(localPath)};`
-                ].join('\n');
+                    namedExportsCode
+                ].filter(Boolean).join('\n');
             }
 
             if (id === '\0ostro:federation/runtime') {
@@ -279,7 +409,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `  registeredRemotes[name] = config;`,
                     `}`,
                     ``,
-                    `export async function __federation_method_getRemote(name, modulePath = '') {`,
+                    `export async function __federation_method_getRemote(name, modulePath = '', shareScope = '${defaultShareScope}') {`,
                     `  const config = registeredRemotes[name] || {};`,
                     `  let url = typeof config.url === 'function' ? await config.url() : (config.url || config.external);`,
                     `  if (url && url.endsWith('.json')) {`,
@@ -290,22 +420,55 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `  }`,
                     `  const container = await import(/* @vite-ignore */ url);`,
                     `  if (container.init) {`,
-                    `    await container.init(window.__OSTRO_SHARED_SCOPE__ || {});`,
+                    `    const activeScope = (window.__OSTRO_FEDERATION_SCOPES__ && window.__OSTRO_FEDERATION_SCOPES__[shareScope]) || window.__OSTRO_SHARED_SCOPE__ || {};`,
+                    `    await container.init(activeScope);`,
                     `  }`,
                     `  return modulePath ? await container.get(modulePath) : container;`,
                     `}`,
                     ``,
+                    `export function __federation_method_unwrapDefault(module) {`,
+                    `  return (module && module.__esModule && module.default) ? module.default : (module?.default || module);`,
+                    `}`,
+                    ``,
+                    `export function __federation_method_wrapDefault(module, needCheck = true) {`,
+                    `  if (!needCheck) return { default: module };`,
+                    `  return (module && (module.__esModule || module[Symbol.toStringTag] === 'Module')) ? module : { default: module };`,
+                    `}`,
+                    ``,
+                    `export async function __federation_method_ensure(name) {`,
+                    `  return __federation_method_getRemote(name);`,
+                    `}`,
+                    ``,
                     `export const setRemote = __federation_method_setRemote;`,
                     `export const getRemote = __federation_method_getRemote;`,
-                    `export default { setRemote, getRemote, __federation_method_setRemote, __federation_method_getRemote };`
+                    `export const unwrapDefault = __federation_method_unwrapDefault;`,
+                    `export const wrapDefault = __federation_method_wrapDefault;`,
+                    `export const ensure = __federation_method_ensure;`,
+                    `export default { setRemote, getRemote, unwrapDefault, wrapDefault, ensure, __federation_method_setRemote, __federation_method_getRemote, __federation_method_unwrapDefault, __federation_method_wrapDefault, __federation_method_ensure };`
                 ].join('\n');
             }
 
             if (id === `\0ostro:federation/${filename}`) {
-                const exposeExports = Object.entries(exposes).map(([exposeKey, exposePath]) => {
+                const exposeExports = Object.entries(exposes).map(([exposeKey, exposeValue]) => {
                     const cleanKey = exposeKey.replace(/^\.\//, '');
+                    const exposePath = typeof exposeValue === 'string' ? exposeValue : exposeValue.import;
+                    const dontAppendStyles = typeof exposeValue === 'object' && !!exposeValue.dontAppendStylesToHead;
                     const resolvedPath = path.isAbsolute(exposePath) ? exposePath : path.resolve(process.cwd(), exposePath);
-                    return `  './${cleanKey}': () => import('${resolvedPath}')`;
+                    return `  './${cleanKey}': async () => {
+    if (typeof window !== 'undefined' && !${dontAppendStyles}) {
+      // Auto-inject styles associated with this exposed module if loaded
+      const styles = window['css__${options.name}__${cleanKey}'] || [];
+      styles.forEach(cssUrl => {
+        if (!document.querySelector('link[href="' + cssUrl + '"]')) {
+          const link = document.createElement('link');
+          link.rel = 'stylesheet';
+          link.href = cssUrl;
+          document.head.appendChild(link);
+        }
+      });
+    }
+    return import('${resolvedPath}');
+  }`;
                 }).join(',\n');
 
                 return [
@@ -321,9 +484,10 @@ export function federation(options: ModuleFederationOptions): Plugin {
                     `  return moduleMap[module]();`,
                     `};`,
                     ``,
-                    `export const init = (shareScope = {}) => {`,
+                    `export const init = (shareScope = {}, scopeName = '${defaultShareScope}') => {`,
                     `  window.__OSTRO_SHARED_SCOPE__ = Object.assign(window.__OSTRO_SHARED_SCOPE__ || {}, shareScope);`,
                     `  window.__OSTRO_FEDERATION_SCOPES__ = window.__OSTRO_FEDERATION_SCOPES__ || {};`,
+                    `  window.__OSTRO_FEDERATION_SCOPES__[scopeName] = Object.assign(window.__OSTRO_FEDERATION_SCOPES__[scopeName] || {}, shareScope);`,
                     `  window.__OSTRO_FEDERATION_SCOPES__['${options.name}'] = shareScope;`,
                     `};`,
                     ``,
@@ -345,11 +509,25 @@ export function federation(options: ModuleFederationOptions): Plugin {
                 const isConfigObj = typeof remoteVal === 'object' && remoteVal !== null;
                 const isPromiseType = isConfigObj && remoteVal.externalType === 'promise';
                 const fromWebpack = isConfigObj && remoteVal.from === 'webpack';
+                const remoteScope = (isConfigObj && remoteVal.shareScope) || defaultShareScope;
                 const remoteExpr = typeof remoteVal === 'string' ? remoteVal : (remoteVal?.external || '');
 
                 const resolveUrlCode = isPromiseType
                     ? `  let url = await (${remoteExpr});`
                     : `  let url = '${remoteExpr}';`;
+
+                const hostSharedEntries = sharedList.map((pkg) => {
+                    const cfg = getSharedConfig(pkg);
+                    const sKey = cfg.shareKey || pkg;
+                    const sVersion = cfg.version || cfg.requiredVersion || '';
+                    return `    if (typeof window !== 'undefined' && !scope['${sKey}']) {
+      try {
+        const mod = await import('${pkg}');
+        const resolved = mod.default || mod;
+        scope['${sKey}'] = { value: resolved, version: '${sVersion}', get: () => Promise.resolve(resolved) };
+      } catch (_) {}
+    }`;
+                }).join('\n');
 
                 return [
                     `// Remote bridge for ${remoteSpecifier}`,
@@ -372,7 +550,13 @@ export function federation(options: ModuleFederationOptions): Plugin {
                         ].join('\n')
                         : `  const container = await import(/* @vite-ignore */ url);`,
                     `  if (container.init) {`,
-                    `    await container.init(window.__OSTRO_SHARED_SCOPE__ || {});`,
+                    `    window.__OSTRO_SHARED_SCOPE__ = window.__OSTRO_SHARED_SCOPE__ || {};`,
+                    `    window.__OSTRO_FEDERATION_SCOPES__ = window.__OSTRO_FEDERATION_SCOPES__ || {};`,
+                    `    const scope = window.__OSTRO_FEDERATION_SCOPES__['${remoteScope}'] || window.__OSTRO_SHARED_SCOPE__;`,
+                    hostSharedEntries,
+                    `    window.__OSTRO_SHARED_SCOPE__ = Object.assign(window.__OSTRO_SHARED_SCOPE__, scope);`,
+                    `    window.__OSTRO_FEDERATION_SCOPES__['${remoteScope}'] = scope;`,
+                    `    await container.init(scope, '${remoteScope}');`,
                     `  }`,
                     subPath
                         ? `  return await container.get('./${subPath}');`
@@ -404,6 +588,7 @@ export function federation(options: ModuleFederationOptions): Plugin {
                         type: 'esm'
                     },
                     filename,
+                    shareScope: defaultShareScope,
                     exposes,
                     remotes,
                     shared,

@@ -6,25 +6,110 @@ import { loadEnv } from 'vite';
 import type { Plugin, UserConfig, ConfigEnv, ResolvedConfig, PluginOption, Rollup } from 'vite';
 import fullReload, { Config as FullReloadConfig } from 'vite-plugin-full-reload';
 
-export interface PluginConfig {
+export interface OutputConfig {
     /**
-     * The path or paths of the entry points to compile.
+     * JavaScript output directory relative to buildDirectory or absolute.
+     * e.g. 'js' -> 'public/build/js/[name].js'
+     */
+    jsDir?: string;
+
+    /**
+     * CSS output directory relative to buildDirectory.
+     * e.g. 'css' -> 'public/build/css/[name].css'
+     */
+    cssDir?: string;
+
+    /**
+     * Static media/assets output directory relative to buildDirectory.
+     * e.g. 'images' or 'assets'
+     */
+    mediaDir?: string;
+
+    /**
+     * Custom chunk file naming pattern (Webpack / asset bundler style).
+     * e.g. 'js/[name].js' or 'js/[name]-[hash].js'
+     */
+    chunkFileNames?: string | ((chunkInfo: any) => string);
+
+    /**
+     * Custom entry file naming pattern.
+     * e.g. 'js/[name].js' or 'js/[name]-[hash].js'
+     */
+    entryFileNames?: string | ((chunkInfo: any) => string);
+
+    /**
+     * Custom asset file naming pattern.
+     * e.g. 'css/[name]-[hash][extname]'
+     */
+    assetFileNames?: string | ((chunkInfo: any) => string);
+}
+
+export interface AssetGroupConfig {
+    /**
+     * Entry file(s) for this specific asset group.
+     * e.g. 'resources/assets/js/app.ts' or ['resources/assets/js/admin.ts', 'resources/assets/js/auth.ts']
      */
     input: Rollup.InputOption;
 
     /**
-     * OstroJS public directory.
+     * Dedicated output directory, subdirectories, or naming rules for this asset group.
+     */
+    output?: OutputConfig;
+
+    /**
+     * Dedicated outDir for this group (overrides buildDirectory).
+     * e.g. 'public/admin-dist'
+     */
+    outDir?: string;
+}
+
+export interface PluginConfig {
+    /**
+     * The path or paths of the entry points to compile.
+     * Optional if `assets` array is provided.
+     */
+    input?: Rollup.InputOption;
+
+    /**
+     * Modular array of asset groups with individual inputs, outputs, and naming configurations.
+     * Allows scalable multi-bundle asset definitions.
+     */
+    assets?: AssetGroupConfig[];
+
+    /**
+     * OstroJS public directory (where build or assets live).
      *
      * @default 'public'
      */
     publicDirectory?: string;
 
     /**
-     * The public subdirectory where compiled assets should be written.
+     * The public subdirectory where compiled assets should be written (e.g. 'build', 'dist', 'assets', or '' for root of publicDirectory).
+     * Set to '' or false to write directly into publicDirectory without creating a build subdirectory.
      *
      * @default 'build'
      */
-    buildDirectory?: string;
+    buildDirectory?: string | false;
+
+    /**
+     * Optional custom target output directory (overrides publicDirectory + buildDirectory).
+     * e.g. 'dist' or 'public/dist'
+     */
+    outDir?: string;
+
+    /**
+     * Whether to empty outDir before building.
+     * When buildDirectory is empty (outputting directly to publicDirectory root),
+     * this automatically defaults to false to protect your static files (images, favicon, etc.).
+     *
+     * @default buildDirectory ? true : false
+     */
+    emptyOutDir?: boolean;
+
+    /**
+     * Detailed sub-directory and file naming rules for JS, CSS, and media assets.
+     */
+    output?: OutputConfig;
 
     /**
      * The path to the "hot" file.
@@ -51,6 +136,32 @@ export interface PluginConfig {
      * @default false
      */
     refresh?: boolean | string | string[] | RefreshConfig | RefreshConfig[];
+
+    /**
+     * Optional HTML generation configuration.
+     * When provided, an HTML file (e.g. 'index.html') will automatically be generated in the output directory
+     * injecting the exact CSS and JS bundle entrypoints dynamically resolved from the build manifest.
+     */
+    html?: boolean | string | {
+        filename?: string;
+        template?: string;
+        title?: string;
+        mountId?: string;
+    };
+
+    /**
+     * Clean up obsolete hashed build files from previous builds.
+     * By default (true), it compares against the build manifest (manifest.json).
+     * If a custom tracking text file is specified (e.g. { trackerFile: 'build-tracker.txt' }),
+     * it generates and tracks previous files via that key-value text file.
+     *
+     * @default true
+     */
+    clean?: boolean | {
+        trackerFile?: string;
+        /** @deprecated use `trackerFile` instead */
+        manifestFile?: string;
+    };
 
     /**
      * Transform the code while serving.
@@ -108,21 +219,52 @@ function resolvePluginConfig(config: string | string[] | PluginConfig): Required
         config = { input: config, ssr: undefined };
     }
 
-    if (typeof config.input === 'undefined') {
-        throw new Error('ostro-vite plugin: missing either "input" or "ssr" configuration.');
+    // Merge inputs from assets array if provided
+    let combinedInput: Rollup.InputOption | undefined = config.input;
+    if (Array.isArray(config.assets) && config.assets.length > 0) {
+        const inputsFromAssets: string[] = [];
+        for (const assetGroup of config.assets) {
+            if (typeof assetGroup.input === 'string') {
+                inputsFromAssets.push(assetGroup.input);
+            } else if (Array.isArray(assetGroup.input)) {
+                inputsFromAssets.push(...(assetGroup.input as string[]));
+            } else if (assetGroup.input && typeof assetGroup.input === 'object') {
+                inputsFromAssets.push(...Object.values(assetGroup.input));
+            }
+        }
+        if (inputsFromAssets.length > 0) {
+            if (!combinedInput) {
+                combinedInput = inputsFromAssets;
+            } else if (Array.isArray(combinedInput)) {
+                combinedInput = [...(combinedInput as string[]), ...inputsFromAssets];
+            } else if (typeof combinedInput === 'string') {
+                combinedInput = [combinedInput, ...inputsFromAssets];
+            }
+        }
+    }
+
+    if (typeof combinedInput === 'undefined' && typeof config.ssr === 'undefined') {
+        throw new Error('ostro-vite plugin: missing either "input", "assets", or "ssr" configuration.');
     }
 
     const publicDirectory = config.publicDirectory ?? 'public';
-    const buildDirectory = config.buildDirectory ?? 'build';
+    const buildDirectory = config.buildDirectory === false ? '' : (config.buildDirectory ?? 'build');
+    const defaultEmptyOutDir = config.emptyOutDir ?? (buildDirectory !== '');
 
     return {
-        input: config.input,
+        input: combinedInput ?? '',
+        assets: config.assets ?? [],
         publicDirectory,
         buildDirectory,
+        outDir: config.outDir ?? '',
+        emptyOutDir: defaultEmptyOutDir,
+        output: config.output ?? {},
         hotFile: config.hotFile ?? path.join(publicDirectory, 'hot'),
         ssr: config.ssr ?? '',
         ssrOutputDirectory: config.ssrOutputDirectory ?? 'bootstrap/ssr',
         refresh: config.refresh ?? false,
+        html: config.html ?? false,
+        clean: config.clean ?? true,
         transformOnServe: config.transformOnServe ?? (code => code),
     };
 }
@@ -134,6 +276,7 @@ function resolveOstroPlugin(pluginConfig: Required<PluginConfig>): OstroPlugin {
     let viteDevServerUrl: DevServerUrl;
     let resolvedConfig: ResolvedConfig;
     let userConfig: UserConfig;
+    const previousFilesToClean = new Set<string>();
 
     return {
         name: 'ostro',
@@ -144,6 +287,42 @@ function resolveOstroPlugin(pluginConfig: Required<PluginConfig>): OstroPlugin {
             const env = loadEnv(mode, userConfig.envDir || process.cwd(), '');
             const assetUrl = env.ASSET_URL ?? '';
 
+            // Handle custom hybrid output directory patterns (Webpack / asset bundler style)
+            const outCfg = pluginConfig.output || {};
+            const jsDir = outCfg.jsDir || 'assets';
+            const cssDir = outCfg.cssDir || 'assets';
+            const mediaDir = outCfg.mediaDir || 'assets';
+
+            const defaultChunkFileNames = outCfg.chunkFileNames || `${jsDir}/[name]-[hash].js`;
+            const defaultEntryFileNames = outCfg.entryFileNames || `${jsDir}/[name]-[hash].js`;
+            const defaultAssetFileNames = outCfg.assetFileNames || ((assetInfo: any) => {
+                if (assetInfo.name && assetInfo.name.endsWith('.css')) {
+                    return `${cssDir}/[name]-[hash][extname]`;
+                }
+                return `${mediaDir}/[name]-[hash][extname]`;
+            });
+
+            // If asset groups define their own custom output naming, build a resolver
+            const assetGroups = pluginConfig.assets || [];
+            const entryFileNameResolver = (chunkInfo: any): string => {
+                for (const group of assetGroups) {
+                    if (group.output?.entryFileNames) {
+                        const inputs = Array.isArray(group.input) ? group.input : [group.input];
+                        if (chunkInfo.facadeModuleId && inputs.some(i => typeof i === 'string' && chunkInfo.facadeModuleId.includes(i))) {
+                            return typeof group.output.entryFileNames === 'function'
+                                ? group.output.entryFileNames(chunkInfo)
+                                : group.output.entryFileNames;
+                        }
+                    }
+                }
+                return typeof defaultEntryFileNames === 'function'
+                    ? defaultEntryFileNames(chunkInfo)
+                    : defaultEntryFileNames;
+            };
+
+            const existingOutput = userConfig.build?.rollupOptions?.output;
+            const outputObj = !Array.isArray(existingOutput) && existingOutput ? existingOutput : {};
+
             return {
                 base: userConfig.base ?? (command === 'build' ? resolveBase(pluginConfig, assetUrl) : ''),
                 publicDir: userConfig.publicDir ?? false,
@@ -151,10 +330,18 @@ function resolveOstroPlugin(pluginConfig: Required<PluginConfig>): OstroPlugin {
                     manifest: userConfig.build?.manifest ?? (ssr ? false : 'manifest.json'),
                     ssrManifest: userConfig.build?.ssrManifest ?? (ssr ? 'ssr-manifest.json' : false),
                     outDir: userConfig.build?.outDir ?? resolveOutDir(pluginConfig, ssr),
+                    emptyOutDir: userConfig.build?.emptyOutDir ?? pluginConfig.emptyOutDir,
                     rollupOptions: {
                         input: userConfig.build?.rollupOptions?.input ?? resolveInput(pluginConfig, ssr),
+                        output: {
+                            chunkFileNames: outputObj.chunkFileNames ?? defaultChunkFileNames,
+                            entryFileNames: outputObj.entryFileNames ?? (assetGroups.length > 0 ? entryFileNameResolver : defaultEntryFileNames),
+                            assetFileNames: outputObj.assetFileNames ?? defaultAssetFileNames,
+                            ...outputObj,
+                        }
                     },
                     assetsInlineLimit: userConfig.build?.assetsInlineLimit ?? 0,
+                    ...(typeof userConfig.build?.modulePreload !== 'undefined' ? { modulePreload: userConfig.build.modulePreload } : {}),
                 },
                 server: {
                     origin: userConfig.server?.origin ?? 'http://__ostro_vite_placeholder__.test',
@@ -178,6 +365,62 @@ function resolveOstroPlugin(pluginConfig: Required<PluginConfig>): OstroPlugin {
         },
         configResolved(config: ResolvedConfig) {
             resolvedConfig = config;
+        },
+        buildStart() {
+            if (!pluginConfig.clean) {
+                return;
+            }
+
+            const outDir = resolvedConfig.build?.outDir
+                ? path.resolve(resolvedConfig.root || process.cwd(), resolvedConfig.build.outDir)
+                : path.resolve(process.cwd(), resolveOutDir(pluginConfig, false));
+
+            const cleanOptions = typeof pluginConfig.clean === 'object' && pluginConfig.clean !== null
+                ? pluginConfig.clean
+                : {};
+            const textTrackerName = cleanOptions.trackerFile || cleanOptions.manifestFile;
+            const textTrackerPath = textTrackerName ? path.resolve(outDir, textTrackerName) : null;
+            const jsonManifestFileName = typeof resolvedConfig.build?.manifest === 'string'
+                ? resolvedConfig.build.manifest
+                : 'manifest.json';
+            const jsonManifestPath = path.resolve(outDir, jsonManifestFileName);
+
+            previousFilesToClean.clear();
+
+            if (textTrackerPath && fs.existsSync(textTrackerPath)) {
+                try {
+                    const content = fs.readFileSync(textTrackerPath, 'utf-8');
+                    for (const line of content.split('\n')) {
+                        const trimmed = line.trim();
+                        if (trimmed && !trimmed.startsWith('#')) {
+                            const separatorIndex = trimmed.indexOf('=');
+                            const val = separatorIndex !== -1 ? trimmed.slice(separatorIndex + 1).trim() : trimmed;
+                            if (val) {
+                                previousFilesToClean.add(val);
+                            }
+                        }
+                    }
+                } catch {}
+            } else if (fs.existsSync(jsonManifestPath)) {
+                try {
+                    const jsonContent = JSON.parse(fs.readFileSync(jsonManifestPath, 'utf-8'));
+                    for (const entry of Object.values(jsonContent) as any[]) {
+                        if (entry.file) {
+                            previousFilesToClean.add(entry.file);
+                        }
+                        if (Array.isArray(entry.css)) {
+                            for (const cssFile of entry.css) {
+                                previousFilesToClean.add(cssFile);
+                            }
+                        }
+                        if (Array.isArray(entry.assets)) {
+                            for (const assetFile of entry.assets) {
+                                previousFilesToClean.add(assetFile);
+                            }
+                        }
+                    }
+                } catch {}
+            }
         },
         transform(code: string) {
             if (resolvedConfig.command === 'serve') {
@@ -230,6 +473,109 @@ function resolveOstroPlugin(pluginConfig: Required<PluginConfig>): OstroPlugin {
                 }
                 next();
             });
+        },
+        generateBundle(_outputOptions: any, bundle: any) {
+            if (!pluginConfig.html) {
+                return;
+            }
+
+            const htmlOptions = typeof pluginConfig.html === 'object' && pluginConfig.html !== null
+                ? pluginConfig.html
+                : {};
+            const htmlFileName = typeof pluginConfig.html === 'string'
+                ? pluginConfig.html
+                : (htmlOptions.filename || 'index.html');
+            const pageTitle = htmlOptions.title || 'OstroJS Application';
+            const mountId = htmlOptions.mountId || 'app';
+
+            const scriptTags: string[] = [];
+            const linkTags: string[] = [];
+
+            for (const [fileName, chunk] of Object.entries(bundle) as [string, any][]) {
+                if (fileName.endsWith('.css') || (chunk.type === 'asset' && chunk.fileName?.endsWith('.css'))) {
+                    linkTags.push(`<link rel="stylesheet" href="/${fileName}">`);
+                } else if (chunk.isEntry && chunk.type === 'chunk' && fileName.endsWith('.js')) {
+                    scriptTags.push(`<script type="module" src="/${fileName}"></script>`);
+                }
+            }
+
+            const htmlContent = htmlOptions.template
+                ? htmlOptions.template
+                    .replace(/<!--\s*css-links\s*-->/gi, linkTags.join('\n    '))
+                    .replace(/<!--\s*js-scripts\s*-->/gi, scriptTags.join('\n    '))
+                    .replace(/\{\{\s*title\s*\}\}/gi, pageTitle)
+                    .replace(/\{\{\s*mountId\s*\}\}/gi, mountId)
+                : `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>${pageTitle}</title>
+    ${linkTags.join('\n    ')}
+</head>
+<body>
+    <div id="${mountId}"></div>
+    ${scriptTags.join('\n    ')}
+</body>
+</html>
+`;
+
+            this.emitFile({
+                type: 'asset',
+                fileName: htmlFileName,
+                source: htmlContent
+            });
+        },
+        writeBundle(_outputOptions: any, bundle: any) {
+            if (!pluginConfig.clean) {
+                return;
+            }
+
+            const outDir = resolvedConfig.build?.outDir
+                ? path.resolve(resolvedConfig.root || process.cwd(), resolvedConfig.build.outDir)
+                : path.resolve(process.cwd(), resolveOutDir(pluginConfig, false));
+
+            const cleanOptions = typeof pluginConfig.clean === 'object' && pluginConfig.clean !== null
+                ? pluginConfig.clean
+                : {};
+            const textTrackerName = cleanOptions.trackerFile || cleanOptions.manifestFile;
+            const textTrackerPath = textTrackerName ? path.resolve(outDir, textTrackerName) : null;
+            const jsonManifestFileName = typeof resolvedConfig.build?.manifest === 'string'
+                ? resolvedConfig.build.manifest
+                : 'manifest.json';
+            const jsonManifestPath = path.resolve(outDir, jsonManifestFileName);
+
+            // Current bundle files
+            const currentFiles = new Set<string>();
+            const currentEntries: Record<string, string> = {};
+
+            for (const [fileName, chunk] of Object.entries(bundle) as [string, any][]) {
+                currentFiles.add(fileName);
+                const key = chunk.name || chunk.facadeModuleId || fileName;
+                currentEntries[key] = fileName;
+            }
+
+            // Delete obsolete files that were in previous build but not in current build
+            for (const oldFile of previousFilesToClean) {
+                if (!currentFiles.has(oldFile) && oldFile !== textTrackerName && oldFile !== jsonManifestFileName) {
+                    const oldFilePath = path.resolve(outDir, oldFile);
+                    if (fs.existsSync(oldFilePath)) {
+                        try {
+                            fs.rmSync(oldFilePath, { force: true });
+                        } catch {}
+                    }
+                }
+            }
+
+            // Only generate text tracker file if user explicitly requested/configured it
+            if (textTrackerPath) {
+                try {
+                    const manifestLines = Object.entries(currentEntries)
+                        .sort(([a], [b]) => a.localeCompare(b))
+                        .map(([k, v]) => `${k}=${v}`);
+                    fs.writeFileSync(textTrackerPath, manifestLines.join('\n') + '\n', 'utf-8');
+                } catch {}
+            }
         }
     };
 }
@@ -253,7 +599,12 @@ function resolveOutDir(pluginConfig: Required<PluginConfig>, ssr: boolean): stri
     if (ssr) {
         return pluginConfig.ssrOutputDirectory;
     }
-    return path.join(pluginConfig.publicDirectory, pluginConfig.buildDirectory);
+    if (pluginConfig.outDir) {
+        return pluginConfig.outDir;
+    }
+    return pluginConfig.buildDirectory
+        ? path.join(pluginConfig.publicDirectory, pluginConfig.buildDirectory)
+        : pluginConfig.publicDirectory;
 }
 
 /**
@@ -270,7 +621,11 @@ function resolveInput(pluginConfig: Required<PluginConfig>, ssr: boolean): Rollu
  * Resolve the base URL path.
  */
 function resolveBase(pluginConfig: Required<PluginConfig>, assetUrl: string): string {
-    return assetUrl + (!assetUrl.endsWith('/') ? '/' : '') + pluginConfig.buildDirectory + '/';
+    const dir = pluginConfig.outDir
+        ? pluginConfig.outDir.replace(new RegExp(`^${pluginConfig.publicDirectory}/?`), '')
+        : pluginConfig.buildDirectory;
+    const prefix = assetUrl ? (!assetUrl.endsWith('/') ? `${assetUrl}/` : assetUrl) : '/';
+    return dir ? `${prefix}${dir}/` : prefix;
 }
 
 /**

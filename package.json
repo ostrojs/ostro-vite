@@ -1,6 +1,6 @@
 {
     "name": "@ostro/vite",
-    "version": "2.0.0-alpha.10",
+    "version": "2.0.0-alpha.11",
     "type": "module",
     "description": "OstroJS plugin for Vite.",
     "keywords": [
@@ -13,12 +13,12 @@
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/ostrojs/ostro-vite.git"
+        "url": "git+https://github.com/ostrojs/vite.git"
     },
     "bugs": {
-        "url": "https://github.com/ostrojs/ostro-vite/issues"
+        "url": "https://github.com/ostrojs/vite/issues"
     },
-    "homepage": "https://github.com/ostrojs/ostro-vite#readme",
+    "homepage": "https://github.com/ostrojs/vite#readme",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "exports": {

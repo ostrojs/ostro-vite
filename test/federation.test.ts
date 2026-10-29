@@ -64,12 +64,35 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         // Test load
         const code = (plugin as any).load('\0ostro:federation/customRemoteEntry.js');
         expect(code).toContain('OstroJS Module Federation remoteEntry: ui_components');
-        expect(code).toContain("'./Button': () => import(");
+        expect(code).toContain("'./Button': async () => {");
         expect(code).toContain("resources/assets/js/components/Button.tsx')");
-        expect(code).toContain("'./Navbar': () => import(");
+        expect(code).toContain("'./Navbar': async () => {");
         expect(code).toContain("resources/assets/js/components/Navbar.tsx')");
         expect(code).toContain('export const get =');
         expect(code).toContain('export const init =');
+    });
+
+    test('supports advanced exposes object with dontAppendStylesToHead and shared import: false', () => {
+        const plugin = federation({
+            name: 'styled_remote',
+            exposes: {
+                './Card': {
+                    import: './resources/assets/js/components/Card.tsx',
+                    dontAppendStylesToHead: true
+                }
+            },
+            shared: {
+                react: { singleton: true, import: false }
+            }
+        });
+
+        const entryCode = (plugin as any).load('\0ostro:federation/remoteEntry.js');
+        expect(entryCode).toContain("'./Card': async () => {");
+        expect(entryCode).toContain('!true');
+
+        const sharedCode = (plugin as any).load('\0ostro:federation/shared/react');
+        expect(sharedCode).toContain('const _LocalPkg = {};');
+        expect(sharedCode).toContain('is marked with import: false and must be provided by the host application');
     });
 
     test('resolves and loads remote bridge for consuming remotes', () => {
@@ -184,18 +207,18 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         const reactId = (plugin as any).resolveId('react');
         expect(reactId).toBe('\0ostro:federation/shared/react');
         const reactCode = (plugin as any).load(reactId);
-        expect(reactCode).toContain("scope['react']");
+        expect(reactCode).toContain("pool['react']");
         expect(reactCode).toContain('export default _proxy;');
 
         const jsxId = (plugin as any).resolveId('react/jsx-runtime');
         expect(jsxId).toBe('\0ostro:federation/shared/react/jsx-runtime');
         const jsxCode = (plugin as any).load(jsxId);
-        expect(jsxCode).toContain("scope['react/jsx-runtime']");
+        expect(jsxCode).toContain("pool['react/jsx-runtime']");
 
         const domId = (plugin as any).resolveId('react-dom');
         expect(domId).toBe('\0ostro:federation/shared/react-dom');
         const domCode = (plugin as any).load(domId);
-        expect(domCode).toContain("scope['react-dom']");
+        expect(domCode).toContain("pool['react-dom']");
 
         const jsxDevId = (plugin as any).resolveId('react/jsx-dev-runtime');
         expect(jsxDevId).toBe('\0ostro:federation/shared/react/jsx-dev-runtime');
@@ -206,8 +229,22 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         const axiosId = (plugin as any).resolveId('axios');
         expect(axiosId).toBe('\0ostro:federation/shared/axios');
         const axiosCode = (plugin as any).load(axiosId);
-        expect(axiosCode).toContain("scope['axios']");
+        expect(axiosCode).toContain("pool['axios']");
         expect(axiosCode).toContain('export default _proxy;');
+        expect(axiosCode).not.toContain('export const constructor');
+
+        // Test with a module that is present in node_modules (picocolors)
+        const pluginObj = federation({
+            name: 'obj_remote',
+            exposes: { './A': './src/A.tsx' },
+            shared: ['picocolors']
+        });
+        const picoId = (pluginObj as any).resolveId('picocolors');
+        expect(picoId).toBe('\0ostro:federation/shared/picocolors');
+        const picoCode = (pluginObj as any).load(picoId);
+        expect(picoCode).toContain("pool['picocolors']");
+        expect(picoCode).toContain('export const red');
+        expect(picoCode).toContain('export const green');
     });
 
     test('exercises config aliases with object-based shared and user alias array', () => {
@@ -270,6 +307,66 @@ describe('Vite Module Federation plugin for OstroJS', () => {
         const chunkNaming2 = resolved2.build.rollupOptions.output.chunkFileNames;
         expect(chunkNaming2({ name: 'remoteEntry' })).toBe('remoteEntry.js');
         expect(chunkNaming2({ name: 'other' })).toBe('assets/[name]-[hash].js');
+    });
+
+    test('supports chunk aliasing, custom chunkFileNames, and manualChunks', () => {
+        const customManualChunks = {
+            vendor: ['react', 'react-dom']
+        };
+
+        const plugin = federation({
+            name: 'chunks_remote',
+            filename: 'remoteEntry.js',
+            chunks: {
+                chunkFileNames: (chunkInfo: any) => `chunks/[name].${chunkInfo.name}.js`,
+                assetFileNames: 'static/[name]-[hash][extname]',
+                entryFileNames: 'entries/[name].js',
+                manualChunks: customManualChunks
+            }
+        });
+
+        const resolved = (plugin as any).config({
+            build: {
+                rollupOptions: {
+                    output: {}
+                }
+            }
+        });
+
+        const output = resolved.build.rollupOptions.output;
+        expect(output.assetFileNames).toBe('static/[name]-[hash][extname]');
+        expect(output.entryFileNames).toBe('entries/[name].js');
+        expect(output.manualChunks).toEqual(customManualChunks);
+
+        const chunkNaming = output.chunkFileNames;
+        expect(chunkNaming({ name: 'remoteEntry' })).toBe('remoteEntry.js');
+        expect(chunkNaming({ name: 'widget' })).toBe('chunks/[name].widget.js');
+    });
+
+    test('supports advanced shared configuration (shareKey, shareScope, and remotes with shareScope)', () => {
+        const plugin = federation({
+            name: 'advanced_shared',
+            exposes: {
+                './Component': './src/Component.tsx'
+            },
+            shared: {
+                react: { singleton: true, shareKey: 'customReactKey', shareScope: 'customScope' }
+            },
+            remotes: {
+                remoteWithScope: {
+                    external: 'http://localhost:9000/remoteEntry.js',
+                    shareScope: 'customScope'
+                }
+            }
+        });
+
+        const reactCode = (plugin as any).load('\0ostro:federation/shared/react');
+        expect(reactCode).toContain("pool['customReactKey']");
+        expect(reactCode).toContain("window.__OSTRO_FEDERATION_SCOPES__['customScope']");
+
+        const remoteBridgeCode = (plugin as any).load('\0ostro:federation/remotes/remoteWithScope/Widget');
+        expect(remoteBridgeCode).toContain("window.__OSTRO_FEDERATION_SCOPES__['customScope']");
+        expect(remoteBridgeCode).toContain("await container.init(scope, 'customScope')");
     });
 
     test('returns null for unrelated resolveId and load', () => {
