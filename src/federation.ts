@@ -321,20 +321,20 @@ export function federation(options: ModuleFederationOptions): Plugin {
 
                 // Dynamically inspect all named exports from the local package to generate delegated proxies
                 let exportKeys: string[] = [];
+                let localPkgMod: any;
                 try {
                     const req = createRequire(path.resolve(process.cwd(), 'package.json'));
-                    let mod: any;
                     try {
                         const resolvedEntry = req.resolve(pkgName);
-                        mod = req(resolvedEntry);
+                        localPkgMod = req(resolvedEntry);
                     } catch (_) {
                         if (localPath && fs.existsSync(localPath)) {
-                            mod = req(localPath);
+                            localPkgMod = req(localPath);
                         }
                     }
-                    if (mod && (typeof mod === 'object' || typeof mod === 'function')) {
-                        const isFn = typeof mod === 'function';
-                        exportKeys = Object.keys(mod).filter(k => {
+                    if (localPkgMod && (typeof localPkgMod === 'object' || typeof localPkgMod === 'function')) {
+                        const isFn = typeof localPkgMod === 'function';
+                        exportKeys = Object.keys(localPkgMod).filter(k => {
                             if (k === 'default') return false;
                             if (k.startsWith('__') && k !== '__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED') return false;
                             return !isFn || !nonStaticMethodNames.has(k);
@@ -353,22 +353,38 @@ export function federation(options: ModuleFederationOptions): Plugin {
                 const namedExportsCode = exportKeys.map(k => {
                     const safeIdentifier = (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(k) && !reservedWords.has(k)) ? k : null;
                     if (!safeIdentifier) return '';
-                    return `export const ${safeIdentifier} = new Proxy(function() {}, {
+                    let isSpecialPrimitive = false;
+                    try {
+                        const val = (localPkgMod as any)[k];
+                        if (typeof val === 'symbol' || (typeof val !== 'object' && typeof val !== 'function')) {
+                            isSpecialPrimitive = true;
+                        }
+                    } catch (_) {}
+
+                    if (isSpecialPrimitive) {
+                        return `export const ${safeIdentifier} = (_LocalPkg && typeof _LocalPkg.${safeIdentifier} !== 'undefined') ? _LocalPkg.${safeIdentifier} : undefined;`;
+                    }
+
+                    return `let _proxy_${safeIdentifier};
+export const ${safeIdentifier} = _proxy_${safeIdentifier} = new Proxy(function() {}, {
   apply(target, thisArg, args) {
     const S = _getShared();
-    const resolved = (S && S !== _proxy) ? S : _LocalPkg;
-    const fn = (resolved && typeof resolved.${safeIdentifier} !== 'undefined') ? resolved.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+    const resolved = (S && S !== _proxy && S !== _LocalPkg) ? S : _LocalPkg;
+    const fn = (resolved && resolved !== _LocalPkg && typeof resolved.${safeIdentifier} !== 'undefined' && resolved.${safeIdentifier} !== _proxy_${safeIdentifier}) ? resolved.${safeIdentifier} : _LocalPkg.${safeIdentifier};
     return typeof fn === 'function' ? fn.apply(resolved || _LocalPkg, args) : fn;
   },
   get(target, prop) {
     const S = _getShared();
-    const resolved = (S && S !== _proxy) ? S : _LocalPkg;
-    const obj = (resolved && typeof resolved.${safeIdentifier} !== 'undefined') ? resolved.${safeIdentifier} : _LocalPkg.${safeIdentifier};
+    const resolved = (S && S !== _proxy && S !== _LocalPkg) ? S : _LocalPkg;
+    const obj = (resolved && resolved !== _LocalPkg && typeof resolved.${safeIdentifier} !== 'undefined' && resolved.${safeIdentifier} !== _proxy_${safeIdentifier}) ? resolved.${safeIdentifier} : _LocalPkg.${safeIdentifier};
     if (obj && typeof obj === 'object') {
-      return obj[prop];
+      return (obj !== _proxy_${safeIdentifier} && typeof obj[prop] !== 'undefined') ? obj[prop] : (typeof _LocalPkg.${safeIdentifier} === 'object' && _LocalPkg.${safeIdentifier} ? _LocalPkg.${safeIdentifier}[prop] : target[prop]);
     }
-    if (typeof obj === 'function' && typeof obj[prop] === 'function') {
-      return obj[prop].bind(obj);
+    if (typeof obj === 'function') {
+      if (typeof obj[prop] === 'function') {
+        return obj[prop].bind(obj);
+      }
+      return (obj !== _proxy_${safeIdentifier} && typeof obj[prop] !== 'undefined') ? obj[prop] : (typeof _LocalPkg.${safeIdentifier} === 'function' ? _LocalPkg.${safeIdentifier}[prop] : target[prop]);
     }
     return obj ? obj[prop] : target[prop];
   }
